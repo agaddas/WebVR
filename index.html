@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TP 03 · WebVR avec A-Frame</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    /* Couleurs relevées dans les scènes elles-mêmes (ciel, herbe, table, cube rouge) */
+    :root {
+      --papier: #f2eee4;
+      --encre: #1f201c;
+      --encre-douce: #55564f;
+      --filet: #d6cfbf;
+      --herbe: #7a9a63;
+      --bois: #8b5e3c;
+      --rouge: #b33b26;       /* #e0533d assombri pour tenir 4,5:1 sur le papier */
+      --ciel: #a9d0ec;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --texte: "Archivo", "Arial Narrow", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --papier: #1b1c19;
+        --encre: #ece8dd;
+        --encre-douce: #a9a699;
+        --filet: #3a3a34;
+        --rouge: #f07a5f;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--papier);
+      color: var(--encre);
+      font-family: var(--texte);
+      font-size: 17px;
+      line-height: 1.55;
+      font-variation-settings: "wdth" 100;
+    }
+    a { color: var(--rouge); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+    a:hover { text-decoration-thickness: 2px; }
+    a:focus-visible { outline: 2px solid var(--rouge); outline-offset: 3px; }
+
+    .page { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
+
+    /* En-tête : titre à gauche, capture réelle à droite, pas de pile centrée */
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+      gap: 40px;
+      align-items: end;
+      padding: 56px 0 36px;
+      border-bottom: 2px solid var(--encre);
+    }
+    .cours { font-family: var(--mono); font-size: 14px; color: var(--encre-douce); margin: 0 0 18px; }
+    h1 {
+      font-size: clamp(40px, 6.2vw, 72px);
+      line-height: 0.98;
+      font-weight: 780;
+      font-variation-settings: "wdth" 82;
+      letter-spacing: -0.005em; word-spacing: 0.05em;
+      margin: 0 0 22px;
+    }
+    .insecable { white-space: nowrap; }
+    .chapeau { font-size: 19px; max-width: 34ch; margin: 0 0 20px; }
+    .auteur { font-size: 15px; color: var(--encre-douce); margin: 0; }
+    header figure { margin: 0; }
+    header img {
+      display: block; width: 100%; height: auto;
+      aspect-ratio: 16 / 10; object-fit: cover;
+      border: 1px solid var(--encre);
+    }
+    figcaption { font-size: 13px; color: var(--encre-douce); margin-top: 8px; }
+
+    h2 {
+      font-size: 28px; font-weight: 720; font-variation-settings: "wdth" 90; word-spacing: 0.04em;
+      margin: 0 0 6px;
+    }
+    section { padding: 44px 0 8px; }
+    .intro-section { max-width: 60ch; color: var(--encre-douce); margin: 0 0 26px; }
+
+    /* Les exercices : une seule forme, la ligne de registre, répétée */
+    .exos { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--filet); }
+    .exo {
+      display: grid;
+      grid-template-columns: 90px minmax(0, 1fr) 300px;
+      gap: 28px;
+      padding: 26px 0;
+      border-bottom: 1px solid var(--filet);
+    }
+    .exo-num {
+      font-family: var(--mono); font-size: 14px; color: var(--encre-douce);
+      padding-top: 6px;
+    }
+    .exo h3 {
+      font-size: 24px; font-weight: 700; font-variation-settings: "wdth" 92; word-spacing: 0.03em;
+      margin: 0 0 8px; line-height: 1.15;
+    }
+    .exo p { margin: 0 0 10px; max-width: 58ch; }
+    .exo ul { margin: 0 0 14px; padding-left: 18px; max-width: 58ch; }
+    .exo li { margin-bottom: 3px; }
+    .ouvrir { font-weight: 600; }
+    .fichier { font-family: var(--mono); font-size: 13px; color: var(--encre-douce); margin-left: 8px; }
+    .exo img {
+      display: block; width: 100%; height: auto;
+      aspect-ratio: 16 / 10; object-fit: cover;
+      border: 1px solid var(--filet);
+    }
+
+    kbd {
+      font-family: var(--mono); font-size: 0.82em;
+      border: 1px solid var(--filet); border-bottom-width: 2px;
+      padding: 0 5px; border-radius: 3px; white-space: nowrap;
+    }
+    code { font-family: var(--mono); font-size: 0.88em; }
+
+    /* Commandes : un vrai tableau, parce que c'est un tableau */
+    .table-wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; min-width: 520px; font-size: 16px; }
+    th, td { text-align: left; padding: 10px 14px 10px 0; border-bottom: 1px solid var(--filet); vertical-align: top; }
+    thead th { font-weight: 650; border-bottom: 2px solid var(--encre); }
+    td:first-child { width: 30%; }
+
+    .deux-col { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; }
+    pre {
+      font-family: var(--mono); font-size: 14px; line-height: 1.6;
+      background: transparent; border-left: 3px solid var(--herbe);
+      padding: 4px 0 4px 14px; margin: 10px 0 14px; overflow-x: auto;
+    }
+    .note { font-size: 15px; color: var(--encre-douce); }
+
+    footer {
+      margin-top: 48px; padding: 20px 0 40px;
+      border-top: 2px solid var(--encre);
+      font-size: 14px; color: var(--encre-douce);
+      display: flex; flex-wrap: wrap; gap: 8px 28px; justify-content: space-between;
+    }
+
+    @media (max-width: 860px) {
+      header { grid-template-columns: 1fr; gap: 26px; padding-top: 32px; }
+      .exo { grid-template-columns: 1fr; gap: 12px; }
+      .exo-num { padding-top: 0; }
+      .exo img { order: -1; }
+      .deux-col { grid-template-columns: 1fr; gap: 10px; }
+    }
+    @media (max-width: 480px) {
+      .page { padding: 0 16px; }
+      body { font-size: 16px; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div>
+      <p class="cours">ST2AWD · Interface development &amp; web design · Efrei I2</p>
+      <h1>TP 03<br>WebVR avec <span class="insecable">A&#8209;Frame</span></h1>
+      <p class="chapeau">Une petite scène VR qu'on construit en quatre étapes : se déplacer, attraper des objets, tirer, puis toucher des cibles.</p>
+      <p class="auteur">Amine GADDAS, septembre 2026</p>
+    </div>
+    <figure>
+      <img src="captures/scene.jpg" width="1200" height="750"
+           alt="La scène finale : table avec les objets et le pistolet, cibles flottantes, particules d'un impact.">
+      <figcaption>La scène de l'exercice 4 : pistolet en main, une cible vient d'éclater en haut à gauche.</figcaption>
+    </figure>
+  </header>
+
+  <section aria-labelledby="t-exos">
+    <h2 id="t-exos">Les scènes</h2>
+    <p class="intro-section">Chaque fichier reprend le précédent et ajoute une couche. On peut donc ouvrir directement le dernier pour tout tester, ou suivre l'ordre pour voir le code grandir.</p>
+
+    <ol class="exos">
+      <li class="exo">
+        <div class="exo-num">Exercice 1</div>
+        <div>
+          <h3>La scène et le déplacement</h3>
+          <p>Un sol, un cube, une sphère et un cylindre. Une lumière directionnelle projette les ombres, une lumière ambiante débouche les zones sombres.</p>
+          <ul>
+            <li>Ombres activées sur le rendu, la lumière et chaque objet (projeter et recevoir).</li>
+            <li>Rig avec caméra et deux manettes : stick gauche pour avancer et se décaler, stick droit pour tourner autour de la tête.</li>
+          </ul>
+          <a class="ouvrir" href="ex1.html">Ouvrir la scène</a><span class="fichier">ex1.html</span>
+        </div>
+        <img src="captures/ex1.jpg" width="1200" height="750" loading="lazy"
+             alt="Cube rouge, sphère bleue et cylindre jaune posés sur l'herbe, avec leurs ombres.">
+      </li>
+
+      <li class="exo">
+        <div class="exo-num">Exercice 2</div>
+        <div>
+          <h3>Attraper et lâcher</h3>
+          <p>Les objets sont posés sur une table et ont un corps physique. Le bouton grip attrape l'objet le plus proche de la main, qui la suit tant qu'on serre.</p>
+          <ul>
+            <li>Pendant la prise, la physique de l'objet est coupée et il devient enfant de la manette.</li>
+            <li>Au relâchement il retrouve son corps, la gravité, et la vitesse de la main : on peut le lancer.</li>
+          </ul>
+          <a class="ouvrir" href="ex2.html">Ouvrir la scène</a><span class="fichier">ex2.html</span>
+        </div>
+        <img src="captures/ex2.jpg" width="1200" height="750" loading="lazy"
+             alt="Le cube rouge tenu en l'air au-dessus de la table, la sphère et le cylindre restés en place.">
+      </li>
+
+      <li class="exo">
+        <div class="exo-num">Exercice 3</div>
+        <div>
+          <h3>Le pistolet</h3>
+          <p>Un modèle 3D de pistolet se saisit comme les autres objets, mais se place dans la main avec une pose fixe. La gâchette tire une balle depuis la bouche du canon.</p>
+          <ul>
+            <li>La balle est une sphère avec un corps dynamique, lancée à 18&nbsp;m/s dans l'axe du canon.</li>
+            <li>Vitesse, masse, gravité propre et durée de vie se règlent dans l'attribut <code>gun</code>.</li>
+          </ul>
+          <a class="ouvrir" href="ex3.html">Ouvrir la scène</a><span class="fichier">ex3.html</span>
+        </div>
+        <img src="captures/ex3.jpg" width="1200" height="750" loading="lazy"
+             alt="Le pistolet tenu en main au premier plan.">
+      </li>
+
+      <li class="exo">
+        <div class="exo-num">Exercice 4</div>
+        <div>
+          <h3>Cibles, impacts et son</h3>
+          <p>Des cibles de formes variées apparaissent au hasard devant le joueur toutes les 2,5 secondes, six au maximum. Une balle qui en touche une la fait éclater.</p>
+          <ul>
+            <li>Impact détecté par l'événement <code>collide</code>, doublé d'un rayon entre deux images pour les balles rapides.</li>
+            <li>Gerbe de particules à la couleur de la cible et son positionnel, atténué avec la distance.</li>
+          </ul>
+          <a class="ouvrir" href="ex4.html">Ouvrir la scène</a><span class="fichier">ex4.html</span>
+        </div>
+        <img src="captures/ex4.jpg" width="1200" height="750" loading="lazy"
+             alt="Cibles flottantes au-dessus du sol et particules d'une cible qui vient d'être touchée.">
+      </li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="t-commandes">
+    <h2 id="t-commandes">Commandes</h2>
+    <p class="intro-section">Pensé pour les manettes Meta Quest (Oculus Touch). Les manettes Vive et Windows Mixed Reality sont déclarées aussi.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Action</th><th>Casque VR</th><th>Navigateur, sans casque</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Se déplacer</td><td>Stick gauche</td><td><kbd>Z</kbd> <kbd>Q</kbd> <kbd>S</kbd> <kbd>D</kbd> ou flèches</td></tr>
+          <tr><td>Tourner</td><td>Stick droit, gauche ou droite</td><td>Cliquer-glisser à la souris</td></tr>
+          <tr><td>Attraper, lâcher</td><td>Grip (appuyer, relâcher)</td><td>Non disponible</td></tr>
+          <tr><td>Tirer</td><td>Gâchette, pistolet en main</td><td><kbd>F</kbd> tire depuis la caméra (exercices 3 et 4)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="t-lancer">
+    <h2 id="t-lancer">Lancer les scènes</h2>
+    <div class="deux-col">
+      <div>
+        <p>Il faut un petit serveur local : ouvert en <code>file://</code>, le navigateur refuse de charger <code>pistolet.glb</code>. Le pistolet s'affiche alors en version simplifiée faite de primitives.</p>
+        <pre>cd TP3
+npx http-server -p 8080</pre>
+        <p class="note">L'extension Live Server de VS Code fait la même chose.</p>
+      </div>
+      <div>
+        <p>Sur le casque, WebXR n'accepte que <code>https</code> ou <code>localhost</code>. Le plus simple est de brancher le Quest en USB et de rediriger le port :</p>
+        <pre>adb reverse tcp:8080 tcp:8080</pre>
+        <p class="note">Puis ouvrir <code>http://localhost:8080</code> dans le navigateur du Quest et appuyer sur le bouton VR en bas à droite.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>A-Frame 1.5.0 · aframe-physics-system 4.2.2 (Cannon)</span>
+    <span>Pistolet modélisé pour ce TP avec three.js, aucune licence tierce</span>
+  </footer>
+
+</div>
+</body>
+</html>

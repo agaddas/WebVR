@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>ST2AWD – TP 03 – Exercice 1 : SceneVR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+
+  <script>
+  /* =====================================================================
+   * EXERCICE 1 — Déplacement aux joysticks
+   * Joystick gauche : avant / arrière / gauche / droite (selon le regard)
+   * Joystick droit  : rotation de la vue
+   * ===================================================================== */
+  AFRAME.registerComponent('joystick-locomotion', {
+    schema: {
+      leftHand:  { type: 'selector' },
+      rightHand: { type: 'selector' },
+      speed:     { default: 2 },    // m/s
+      turnSpeed: { default: 90 },   // degrés/s
+      deadzone:  { default: 0.2 }
+    },
+    init() {
+      this.move = { x: 0, y: 0 };
+      this.turn = 0;
+      this.data.leftHand.addEventListener('thumbstickmoved', e => {
+        this.move.x = e.detail.x; this.move.y = e.detail.y;
+      });
+      this.data.rightHand.addEventListener('thumbstickmoved', e => {
+        this.turn = e.detail.x;
+      });
+      this.forward = new THREE.Vector3();
+      this.right = new THREE.Vector3();
+      this.up = new THREE.Vector3(0, 1, 0);
+      this.before = new THREE.Vector3();
+      this.after = new THREE.Vector3();
+    },
+    tick(t, dtMs) {
+      if (!dtMs) return;
+      const d = this.data;
+      const dt = Math.min(dtMs, 100) / 1000;
+      const rig = this.el.object3D;
+      const cam = this.el.sceneEl.camera;   // mis à jour par WebXR en VR
+      const dz = v => (Math.abs(v) < d.deadzone ? 0 : v);
+
+      // Rotation autour de la tête (et non du centre du rig)
+      const turn = dz(this.turn);
+      if (turn) {
+        cam.getWorldPosition(this.before);
+        rig.rotation.y -= THREE.MathUtils.degToRad(d.turnSpeed) * turn * dt;
+        rig.updateMatrixWorld(true);
+        cam.getWorldPosition(this.after);
+        rig.position.x += this.before.x - this.after.x;
+        rig.position.z += this.before.z - this.after.z;
+      }
+
+      // Translation dans le plan horizontal, relative au regard
+      const mx = dz(this.move.x), my = dz(this.move.y);
+      if (mx || my) {
+        cam.getWorldDirection(this.forward);
+        this.forward.y = 0;
+        if (this.forward.lengthSq() < 1e-6) return;
+        this.forward.normalize();
+        this.right.crossVectors(this.forward, this.up);
+        rig.position
+          .addScaledVector(this.forward, -my * d.speed * dt) // y < 0 = stick poussé vers l'avant
+          .addScaledVector(this.right, mx * d.speed * dt);
+      }
+    }
+  });
+
+  </script>
+</head>
+
+<body>
+  <a-scene
+    renderer="antialias: true; colorManagement: true"
+    shadow="type: pcfsoft">
+
+    <a-sky color="#a9d0ec"></a-sky>
+
+    <!-- ========== EXERCICE 1 : lumières ========== -->
+    <a-entity light="type: ambient; color: #ffffff; intensity: 0.45"></a-entity>
+    <a-entity position="-4 10 6"
+      light="type: directional; color: #ffffff; intensity: 0.9;
+             castShadow: true; shadowMapWidth: 2048; shadowMapHeight: 2048;
+             shadowCameraLeft: -15; shadowCameraRight: 15;
+             shadowCameraTop: 15; shadowCameraBottom: -15;
+             shadowCameraFar: 40; shadowBias: -0.0005"></a-entity>
+
+    <!-- Sol -->
+    <a-plane rotation="-90 0 0" width="40" height="40"
+      color="#7a9a63" shadow="cast: false; receive: true"></a-plane>
+
+    <!-- Objets simples -->
+    <a-box position="-1.2 0.5 -3" width="1" height="1" depth="1" rotation="0 30 0"
+      color="#e0533d" shadow="cast: true; receive: true"></a-box>
+    <a-sphere position="0.3 0.6 -3.5" radius="0.6"
+      color="#3d7be0" shadow="cast: true; receive: true"></a-sphere>
+    <a-cylinder position="1.6 0.5 -2.8" radius="0.35" height="1"
+      color="#e0c33d" shadow="cast: true; receive: true"></a-cylinder>
+
+    <!-- ========== EXERCICE 1 : rig joueur ========== -->
+    <a-entity id="rig" position="0 0 0.5"
+      joystick-locomotion="leftHand: #leftHand; rightHand: #rightHand; speed: 2; turnSpeed: 90">
+      <a-entity id="camera" camera look-controls wasd-controls position="0 1.6 0"></a-entity>
+
+      <a-entity id="leftHand"
+        oculus-touch-controls="hand: left"
+        vive-controls="hand: left"
+        windows-motion-controls="hand: left"
+        ></a-entity>
+
+      <a-entity id="rightHand"
+        oculus-touch-controls="hand: right"
+        vive-controls="hand: right"
+        windows-motion-controls="hand: right"
+        ></a-entity>
+    </a-entity>
+  </a-scene>
+</body>
+</html>

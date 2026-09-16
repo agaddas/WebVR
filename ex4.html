@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>ST2AWD – TP 03 – Exercice 4 : Cibles et particules</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-physics-system@v4.2.2/dist/aframe-physics-system.min.js"></script>
+
+  <script>
+  /* =====================================================================
+   * EXERCICE 1 — Déplacement aux joysticks
+   * Joystick gauche : avant / arrière / gauche / droite (selon le regard)
+   * Joystick droit  : rotation de la vue
+   * ===================================================================== */
+  AFRAME.registerComponent('joystick-locomotion', {
+    schema: {
+      leftHand:  { type: 'selector' },
+      rightHand: { type: 'selector' },
+      speed:     { default: 2 },    // m/s
+      turnSpeed: { default: 90 },   // degrés/s
+      deadzone:  { default: 0.2 }
+    },
+    init() {
+      this.move = { x: 0, y: 0 };
+      this.turn = 0;
+      this.data.leftHand.addEventListener('thumbstickmoved', e => {
+        this.move.x = e.detail.x; this.move.y = e.detail.y;
+      });
+      this.data.rightHand.addEventListener('thumbstickmoved', e => {
+        this.turn = e.detail.x;
+      });
+      this.forward = new THREE.Vector3();
+      this.right = new THREE.Vector3();
+      this.up = new THREE.Vector3(0, 1, 0);
+      this.before = new THREE.Vector3();
+      this.after = new THREE.Vector3();
+    },
+    tick(t, dtMs) {
+      if (!dtMs) return;
+      const d = this.data;
+      const dt = Math.min(dtMs, 100) / 1000;
+      const rig = this.el.object3D;
+      const cam = this.el.sceneEl.camera;   // mis à jour par WebXR en VR
+      const dz = v => (Math.abs(v) < d.deadzone ? 0 : v);
+
+      // Rotation autour de la tête (et non du centre du rig)
+      const turn = dz(this.turn);
+      if (turn) {
+        cam.getWorldPosition(this.before);
+        rig.rotation.y -= THREE.MathUtils.degToRad(d.turnSpeed) * turn * dt;
+        rig.updateMatrixWorld(true);
+        cam.getWorldPosition(this.after);
+        rig.position.x += this.before.x - this.after.x;
+        rig.position.z += this.before.z - this.after.z;
+      }
+
+      // Translation dans le plan horizontal, relative au regard
+      const mx = dz(this.move.x), my = dz(this.move.y);
+      if (mx || my) {
+        cam.getWorldDirection(this.forward);
+        this.forward.y = 0;
+        if (this.forward.lengthSq() < 1e-6) return;
+        this.forward.normalize();
+        this.right.crossVectors(this.forward, this.up);
+        rig.position
+          .addScaledVector(this.forward, -my * d.speed * dt) // y < 0 = stick poussé vers l'avant
+          .addScaledVector(this.right, mx * d.speed * dt);
+      }
+    }
+  });
+
+  /* =====================================================================
+   * EXERCICE 2 — Grab / release
+   * Grip appuyé  : l'objet le plus proche est attaché à la main (physique coupée)
+   * Grip relâché : l'objet revient dans la scène avec la vitesse de la main
+   * ===================================================================== */
+
+  // Position/rotation de l'objet dans la main (utile pour l'arme)
+  AFRAME.registerComponent('hold-pose', {
+    schema: {
+      position: { type: 'vec3', default: { x: 0, y: 0, z: 0 } },
+      rotation: { type: 'vec3', default: { x: 0, y: 0, z: 0 } }
+    }
+  });
+
+  AFRAME.registerComponent('grabber', {
+    schema: {
+      radius:   { default: 0.12 },  // prise directe : objet à moins de 12 cm de la main
+      reach:    { default: 4 },     // prise à distance : objet visé jusqu'à 4 m
+      holdDist: { default: 0.1 }    // un objet attrapé à distance arrive à 10 cm devant la main
+    },
+    init() {
+      this.held = null;
+      this.handPos = new THREE.Vector3();
+      this.prevPos = new THREE.Vector3();
+      this.velocity = new THREE.Vector3();
+      this.tmp = new THREE.Vector3();
+      this.box = new THREE.Box3();
+      // Le rayon de visée n'apparaît qu'une fois la manette détectée
+      this.el.addEventListener('controllerconnected', () => this.el.setAttribute('line', 'visible', true));
+      this.el.addEventListener('controllerdisconnected', () => this.el.setAttribute('line', 'visible', false));
+      this.ray = new THREE.Ray();
+      this.quat = new THREE.Quaternion();
+      this.hit = new THREE.Vector3();
+      this.el.addEventListener('gripdown', () => { console.log('[grabber] gripdown', this.el.id); this.grab(); });
+      this.el.addEventListener('gripup', () => this.release());
+      // Exercice 3 : la gâchette déclenche le tir si on tient une arme
+      this.el.addEventListener('triggerdown', () => {
+        if (this.held && this.held.components.gun) this.held.components.gun.fire();
+      });
+    },
+    grab() {
+      if (this.held) return;
+      this.el.object3D.getWorldPosition(this.handPos);
+      let best = null, bestDist = Infinity;
+      document.querySelectorAll('.grabbable').forEach(obj => {
+        if (obj.grabbedBy) return;
+        this.box.setFromObject(obj.object3D);
+        const dist = this.box.distanceToPoint(this.handPos);
+        if (dist < this.data.radius && dist < bestDist) { best = obj; bestDist = dist; }
+      });
+
+      // Rien à portée de main : on prend l'objet visé par la manette (utile avec l'émulateur)
+      let fromAfar = false;
+      if (!best) {
+        this.el.object3D.getWorldQuaternion(this.quat);
+        this.ray.set(this.handPos, new THREE.Vector3(0, 0, -1).applyQuaternion(this.quat));
+        bestDist = Infinity;
+        document.querySelectorAll('.grabbable').forEach(obj => {
+          if (obj.grabbedBy) return;
+          this.box.setFromObject(obj.object3D).expandByScalar(0.05);
+          if (!this.ray.intersectBox(this.box, this.hit)) return;
+          const dist = this.hit.distanceTo(this.handPos);
+          if (dist < this.data.reach && dist < bestDist) { best = obj; bestDist = dist; }
+        });
+        fromAfar = !!best;
+      }
+      if (!best) { console.log('[grabber] aucun objet à portée ni visé'); return; }
+
+      this.held = best;
+      best.grabbedBy = this.el;
+      best.bodyConfig = Object.assign({}, best.getAttribute('dynamic-body'));
+      best.removeAttribute('dynamic-body');          // l'objet ne subit plus la physique
+      this.el.object3D.attach(best.object3D);        // il suit la main
+      if (fromAfar) best.object3D.position.set(0, 0, -this.data.holdDist);
+
+      const pose = best.getAttribute('hold-pose');
+      if (pose) {
+        best.object3D.position.set(pose.position.x, pose.position.y, pose.position.z);
+        best.object3D.rotation.set(
+          THREE.MathUtils.degToRad(pose.rotation.x),
+          THREE.MathUtils.degToRad(pose.rotation.y),
+          THREE.MathUtils.degToRad(pose.rotation.z));
+      }
+      pulse(this.el, 0.3, 40);
+      best.emit('grabbed', { hand: this.el });
+    },
+    release() {
+      const obj = this.held;
+      if (!obj) return;
+      this.held = null;
+      obj.grabbedBy = null;
+      this.el.sceneEl.object3D.attach(obj.object3D); // retour dans la scène (coords monde)
+      const v = this.velocity.clone();
+      setInitialVelocity(obj, v);                    // lancer avec la vitesse de la main
+      obj.setAttribute('dynamic-body', obj.bodyConfig); // gravité réactivée
+      obj.emit('released', { hand: this.el });
+    },
+    tick(t, dt) {
+      if (!dt) return;
+      this.el.object3D.getWorldPosition(this.handPos);
+      this.tmp.subVectors(this.handPos, this.prevPos).multiplyScalar(1000 / dt);
+      this.velocity.lerp(this.tmp, 0.5);
+      this.prevPos.copy(this.handPos);
+    }
+  });
+
+  /* Vitesse initiale d'un corps physique.
+   * Attention : le composant body copie l'attribut `velocity` (0 0 0) vers
+   * Cannon juste après 'body-loaded' (dans play()). Une vitesse posée dans
+   * 'body-loaded' est donc écrasée : on l'applique au premier pas physique. */
+  function setInitialVelocity(el, v) {
+    const apply = () => {
+      const world = el.sceneEl.systems.physics.driver.world;
+      const once = () => {
+        world.removeEventListener('preStep', once);
+        if (el.body) el.body.velocity.set(v.x, v.y, v.z);
+      };
+      world.addEventListener('preStep', once);
+    };
+    el.addEventListener('body-loaded', apply, { once: true });
+  }
+
+  function pulse(hand, intensity, ms) {
+    try {
+      hand.components['tracked-controls'].controller.gamepad.hapticActuators[0].pulse(intensity, ms);
+    } catch (e) { /* pas de retour haptique disponible */ }
+  }
+
+  /* =====================================================================
+   * EXERCICE 3 — Arme et projectiles
+   * ===================================================================== */
+  AFRAME.registerComponent('gun', {
+    schema: {
+      speed:        { default: 18 },   // vitesse initiale (m/s)
+      bulletRadius: { default: 0.03 },
+      bulletMass:   { default: 0.05 },
+      gravityScale: { default: 1 },    // 0 = pas de chute, 1 = gravité normale
+      lifetime:     { default: 4 },    // secondes
+      cooldown:     { default: 150 },  // ms entre deux tirs
+      color:        { type: 'color', default: '#ffcc33' }
+    },
+    init() {
+      this.lastShot = 0;
+      this.muzzle = this.el.querySelector('.muzzle');
+      // Modèle .glb indisponible : on montre l'arme en primitives.
+      // En file:// le chargement échoue souvent avant init(), d'où le test direct.
+      const fallback = this.el.querySelector('.gun-fallback');
+      const showFallback = () => fallback && fallback.setAttribute('visible', true);
+      this.el.addEventListener('model-error', showFallback);
+      if (location.protocol === 'file:') showFallback();
+      this.pos = new THREE.Vector3();
+      this.quat = new THREE.Quaternion();
+      this.dir = new THREE.Vector3();
+    },
+    fire() {
+      const now = performance.now();
+      if (now - this.lastShot < this.data.cooldown) return;
+      this.lastShot = now;
+      this.muzzle.object3D.getWorldPosition(this.pos);
+      this.muzzle.object3D.getWorldQuaternion(this.quat);
+      this.dir.set(0, 0, -1).applyQuaternion(this.quat);   // le canon pointe vers -Z
+      spawnProjectile(this.el.sceneEl, this.pos, this.dir, this.data);
+      if (this.el.grabbedBy) pulse(this.el.grabbedBy, 0.7, 60);
+    }
+  });
+
+  function spawnProjectile(scene, pos, dir, o) {
+    const v = dir.clone().normalize().multiplyScalar(o.speed);
+    const b = document.createElement('a-sphere');
+    b.setAttribute('radius', o.bulletRadius);
+    b.setAttribute('color', o.color);
+    b.setAttribute('position', { x: pos.x, y: pos.y, z: pos.z });
+    b.setAttribute('shadow', 'cast: true; receive: false');
+    b.setAttribute('dynamic-body', {
+      shape: 'sphere', sphereRadius: o.bulletRadius, mass: o.bulletMass,
+      linearDamping: 0.01, angularDamping: 0.01
+    });
+    b.setAttribute('projectile', {
+      lifetime: o.lifetime, gravityScale: o.gravityScale, radius: o.bulletRadius
+    });
+    // Force initiale : on donne directement la vitesse au corps physique
+    setInitialVelocity(b, v);
+    scene.appendChild(b);
+  }
+
+  AFRAME.registerComponent('projectile', {
+    schema: {
+      lifetime:     { default: 4 },
+      gravityScale: { default: 1 },
+      radius:       { default: 0.03 }
+    },
+    init() {
+      this.born = performance.now();
+      this.prev = new THREE.Vector3();
+      this.cur = new THREE.Vector3();
+      this.seg = new THREE.Vector3();
+      this.started = false;
+      this.dead = false;
+      this.ray = new THREE.Raycaster();
+
+      // Détection 1 : événement de collision du moteur physique
+      this.onCollide = e => {
+        const other = e.detail.body && e.detail.body.el;
+        if (other && other.classList.contains('target')) {
+          this.hit(other, this.el.object3D.position.clone());
+        }
+      };
+      this.el.addEventListener('collide', this.onCollide);
+
+      // Gravité propre au projectile : force additionnelle avant chaque pas physique
+      this.world = this.el.sceneEl.systems.physics.driver.world;
+      this.onPreStep = () => {
+        const body = this.el.body;
+        if (!body) return;
+        const k = this.data.gravityScale - 1;
+        const g = this.world.gravity;
+        body.force.x += body.mass * g.x * k;
+        body.force.y += body.mass * g.y * k;
+        body.force.z += body.mass * g.z * k;
+      };
+      if (this.data.gravityScale !== 1) this.world.addEventListener('preStep', this.onPreStep);
+    },
+    tick() {
+      if (this.dead) return;
+      if (performance.now() - this.born > this.data.lifetime * 1000) return this.destroy();
+
+      // Détection 2 : raycast entre deux frames (évite qu'une balle rapide traverse une cible)
+      this.el.object3D.getWorldPosition(this.cur);
+      if (!this.started) { this.prev.copy(this.cur); this.started = true; return; }
+      this.seg.subVectors(this.cur, this.prev);
+      const len = this.seg.length();
+      if (len > 1e-5) {
+        const targets = Array.from(document.querySelectorAll('.target'))
+          .filter(t => !t.isHit).map(t => t.object3D);
+        if (targets.length) {
+          this.ray.set(this.prev, this.seg.divideScalar(len));
+          this.ray.far = len + this.data.radius;
+          const hits = this.ray.intersectObjects(targets, true);
+          if (hits.length) {
+            let o = hits[0].object;
+            while (o && !(o.el && o.el.classList.contains('target'))) o = o.parent;
+            if (o) this.hit(o.el, hits[0].point);
+          }
+        }
+      }
+      this.prev.copy(this.cur);
+    },
+    hit(target, point) {
+      if (this.dead || target.isHit) return;
+      target.isHit = true;
+      this.el.sceneEl.emit('target-hit', { target, point: point.clone() });
+      this.destroy();
+    },
+    destroy() {
+      if (this.dead) return;
+      this.dead = true;
+      // Suppression différée : jamais pendant un pas du moteur physique
+      setTimeout(() => { if (this.el.parentNode) this.el.parentNode.removeChild(this.el); }, 0);
+    },
+    remove() {
+      this.el.removeEventListener('collide', this.onCollide);
+      this.world.removeEventListener('preStep', this.onPreStep);
+    }
+  });
+
+  /* =====================================================================
+   * EXERCICE 4 — Cibles aléatoires, impacts, particules, son
+   * ===================================================================== */
+  AFRAME.registerComponent('target-spawner', {
+    schema: {
+      initialDelay: { default: 2000 },   // ms avant la première cible
+      interval:     { default: 2500 },   // ms entre deux apparitions
+      max:          { default: 6 },      // cibles simultanées
+      areaMin:      { type: 'vec3', default: { x: -6, y: 0.8, z: -14 } },
+      areaMax:      { type: 'vec3', default: { x:  6, y: 3.5, z: -6 } },
+      volume:       { default: 1 },
+      refDistance:  { default: 3 },      // distance à laquelle le volume commence à baisser
+      rolloff:      { default: 1 },      // vitesse d'atténuation avec la distance
+      scoreText:    { type: 'selector' }
+    },
+    init() {
+      this.score = 0;
+      this.elapsed = this.data.interval - this.data.initialDelay;
+      this.colors = ['#e63946', '#f4a261', '#2a9d8f', '#8338ec', '#ffbe0b', '#3a86ff'];
+      this.el.sceneEl.addEventListener('target-hit', e => this.handleHit(e.detail));
+
+      const setupAudio = () => {
+        this.listener = new THREE.AudioListener();
+        this.el.sceneEl.camera.add(this.listener);
+        this.buffer = this.makeHitBuffer(this.listener.context);
+      };
+      if (this.el.sceneEl.hasLoaded) setupAudio();
+      else this.el.sceneEl.addEventListener('loaded', setupAudio);
+
+      // Les navigateurs bloquent l'audio avant une interaction
+      const resume = () => {
+        const ctx = THREE.AudioContext.getContext();
+        if (ctx.state === 'suspended') ctx.resume();
+      };
+      window.addEventListener('click', resume);
+      window.addEventListener('keydown', resume);
+      this.el.sceneEl.addEventListener('enter-vr', resume);
+    },
+    tick(t, dt) {
+      if (!dt) return;
+      this.elapsed += dt;
+      if (this.elapsed < this.data.interval) return;
+      this.elapsed = 0;
+      if (document.querySelectorAll('.target').length < this.data.max) this.spawn();
+    },
+    spawn() {
+      const d = this.data;
+      const rnd = (a, b) => a + Math.random() * (b - a);
+      const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+      const shapes = [
+        { tag: 'a-box',          attrs: { width: 0.6, height: 0.6, depth: 0.6 } },
+        { tag: 'a-cone',         attrs: { 'radius-bottom': 0.4, 'radius-top': 0, height: 0.8 } },
+        { tag: 'a-sphere',       attrs: { radius: 0.4 } },
+        { tag: 'a-cylinder',     attrs: { radius: 0.3, height: 0.8 } },
+        { tag: 'a-octahedron',   attrs: { radius: 0.45 } },
+        { tag: 'a-dodecahedron', attrs: { radius: 0.45 } }
+      ];
+      const s = pick(shapes);
+      const t = document.createElement(s.tag);
+      Object.entries(s.attrs).forEach(([k, v]) => t.setAttribute(k, v));
+      t.classList.add('target');
+      t.setAttribute('color', pick(this.colors));
+      t.setAttribute('position', {
+        x: rnd(d.areaMin.x, d.areaMax.x),
+        y: rnd(d.areaMin.y, d.areaMax.y),
+        z: rnd(d.areaMin.z, d.areaMax.z)
+      });
+      t.setAttribute('rotation', { x: 0, y: rnd(0, 360), z: 0 });
+      t.setAttribute('shadow', 'cast: true; receive: true');
+      t.setAttribute('static-body', '');   // les cibles flottent et bloquent les objets
+      this.el.sceneEl.appendChild(t);
+    },
+    handleHit({ target, point }) {
+      if (!target.parentNode) return;
+      const burst = document.createElement('a-entity');
+      burst.setAttribute('position', { x: point.x, y: point.y, z: point.z });
+      burst.setAttribute('particle-burst', { color: target.getAttribute('color') || '#ffaa00' });
+      this.el.sceneEl.appendChild(burst);
+
+      this.playHit(point);
+
+      setTimeout(() => { if (target.parentNode) target.parentNode.removeChild(target); }, 0);
+      this.score++;
+      if (this.data.scoreText) this.data.scoreText.setAttribute('value', 'Score : ' + this.score);
+    },
+    playHit(point) {
+      if (!this.listener) return;
+      const d = this.data;
+      const holder = new THREE.Object3D();
+      holder.position.copy(point);
+      this.el.sceneEl.object3D.add(holder);
+      const sound = new THREE.PositionalAudio(this.listener);
+      sound.setBuffer(this.buffer);
+      sound.setDistanceModel('inverse');
+      sound.setRefDistance(d.refDistance);
+      sound.setRolloffFactor(d.rolloff);
+      sound.setVolume(d.volume);
+      holder.add(sound);
+      sound.play();
+      setTimeout(() => {
+        try { sound.disconnect(); } catch (e) {}
+        this.el.sceneEl.object3D.remove(holder);
+      }, 1200);
+    },
+    // Son d'impact généré (explosion courte + tintement), aucun fichier requis.
+    // Pour un fichier : <a-entity sound="src: url(hit.mp3); refDistance: 3"> puis .playSound()
+    makeHitBuffer(ctx) {
+      const sr = ctx.sampleRate, dur = 0.8, n = Math.floor(sr * dur);
+      const buf = ctx.createBuffer(1, n, sr);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) {
+        const t = i / sr;
+        const noise = (Math.random() * 2 - 1) * Math.exp(-t * 22);
+        const thump = Math.sin(2 * Math.PI * (110 - 60 * t) * t) * Math.exp(-t * 9);
+        const bell = (Math.sin(2 * Math.PI * 880 * t) + 0.5 * Math.sin(2 * Math.PI * 1760 * t))
+                     * Math.exp(-t * 6) * 0.3;
+        ch[i] = Math.max(-1, Math.min(1, 0.55 * noise + 0.6 * thump + bell));
+      }
+      return buf;
+    }
+  });
+
+  AFRAME.registerComponent('particle-burst', {
+    schema: {
+      color:    { type: 'color', default: '#ffaa00' },
+      count:    { default: 90 },
+      speed:    { default: 3.5 },
+      size:     { default: 0.07 },
+      lifetime: { default: 900 }   // ms
+    },
+    init() {
+      const d = this.data, n = d.count;
+      this.pos = new Float32Array(n * 3);
+      this.vel = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const dir = new THREE.Vector3(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1)
+          .normalize().multiplyScalar(d.speed * (0.3 + Math.random() * 0.7));
+        this.vel[i * 3] = dir.x; this.vel[i * 3 + 1] = dir.y; this.vel[i * 3 + 2] = dir.z;
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
+      this.mat = new THREE.PointsMaterial({
+        color: d.color, size: d.size, transparent: true,
+        depthWrite: false, blending: THREE.AdditiveBlending
+      });
+      this.points = new THREE.Points(geo, this.mat);
+      this.points.frustumCulled = false;
+      this.el.setObject3D('particles', this.points);
+      this.age = 0;
+    },
+    tick(t, dt) {
+      if (!dt || this.done) return;
+      const s = dt / 1000, p = this.pos, v = this.vel;
+      this.age += dt;
+      for (let i = 0; i < p.length; i += 3) {
+        v[i + 1] -= 6 * s;          // légère gravité
+        v[i] *= 0.97; v[i + 1] *= 0.97; v[i + 2] *= 0.97;
+        p[i] += v[i] * s; p[i + 1] += v[i + 1] * s; p[i + 2] += v[i + 2] * s;
+      }
+      this.points.geometry.attributes.position.needsUpdate = true;
+      const k = this.age / this.data.lifetime;
+      this.mat.opacity = Math.max(0, 1 - k);
+      if (k >= 1) {
+        this.done = true;
+        setTimeout(() => { if (this.el.parentNode) this.el.parentNode.removeChild(this.el); }, 0);
+      }
+    },
+    remove() {
+      this.el.removeObject3D('particles');
+      this.points.geometry.dispose();
+      this.mat.dispose();
+    }
+  });
+
+  /* Test sans casque : touche F = tir depuis la caméra */
+  AFRAME.registerComponent('desktop-fire', {
+    init() {
+      const pos = new THREE.Vector3(), dir = new THREE.Vector3();
+      window.addEventListener('keydown', e => {
+        if (e.code !== 'KeyF' || e.repeat) return;
+        const cam = this.el.camera;
+        cam.getWorldPosition(pos);
+        cam.getWorldDirection(dir);
+        pos.addScaledVector(dir, 0.4);
+        const gun = document.querySelector('[gun]');
+        spawnProjectile(this.el, pos, dir, gun.components.gun.data);
+      });
+    }
+  });
+  </script>
+</head>
+
+<body>
+  <a-scene
+    renderer="antialias: true; colorManagement: true"
+    shadow="type: pcfsoft"
+    physics="driver: local; gravity: -9.8; debug: false"
+    target-spawner="initialDelay: 2000; interval: 2500; max: 6; volume: 1; refDistance: 3; rolloff: 1; scoreText: #score"
+    desktop-fire>
+
+    <a-sky color="#a9d0ec"></a-sky>
+
+    <!-- ========== EXERCICE 1 : lumières ========== -->
+    <a-entity light="type: ambient; color: #ffffff; intensity: 0.45"></a-entity>
+    <a-entity position="-4 10 6"
+      light="type: directional; color: #ffffff; intensity: 0.9;
+             castShadow: true; shadowMapWidth: 2048; shadowMapHeight: 2048;
+             shadowCameraLeft: -15; shadowCameraRight: 15;
+             shadowCameraTop: 15; shadowCameraBottom: -15;
+             shadowCameraFar: 40; shadowBias: -0.0005"></a-entity>
+
+    <!-- Sol (boîte fine : collision plus fiable qu'un plan) -->
+    <a-box static-body position="0 -0.05 0" width="40" height="0.1" depth="40"
+      color="#7a9a63" shadow="cast: false; receive: true"></a-box>
+
+    <!-- Table -->
+    <a-box static-body position="0 0.4 -1.2" width="1.4" height="0.8" depth="0.7"
+      color="#8b5e3c" shadow="cast: true; receive: true"></a-box>
+
+    <!-- Objets simples (Ex. 1) rendus saisissables (Ex. 2) -->
+    <a-box class="grabbable" dynamic-body="mass: 0.5"
+      position="-0.45 0.95 -1.2" width="0.2" height="0.2" depth="0.2"
+      color="#e0533d" shadow="cast: true; receive: true"></a-box>
+
+    <a-sphere class="grabbable" dynamic-body="shape: sphere; sphereRadius: 0.1; mass: 0.4"
+      position="-0.15 0.95 -1.2" radius="0.1"
+      color="#3d7be0" shadow="cast: true; receive: true"></a-sphere>
+
+    <a-cylinder class="grabbable" dynamic-body="mass: 0.4"
+      position="0.1 0.95 -1.2" radius="0.07" height="0.2"
+      color="#e0c33d" shadow="cast: true; receive: true"></a-cylinder>
+
+    <!-- ========== EXERCICE 3 : arme ==========
+         Modèle 3D : models/pistolet.glb (canon vers -Z, unités en mètres).
+         Le modèle est décalé dans un enfant pour que sa boîte englobante soit
+         centrée sur l'entité : la boîte invisible sert de forme de collision.
+         Si le .glb ne se charge pas (ouverture en file://, fichier absent),
+         la version en primitives s'affiche à la place. -->
+    <a-entity id="gun" class="grabbable"
+      position="0.45 0.83 -1.2" rotation="0 90 90"
+      geometry="primitive: box; width: 0.04; height: 0.19; depth: 0.39"
+      material="visible: false"
+      dynamic-body="shape: box; mass: 1"
+      hold-pose="position: 0 0.035 -0.154; rotation: 0 0 0"
+      gun="speed: 30; gravityScale: 1; bulletMass: 0.05; bulletRadius: 0.03; lifetime: 4">
+      <a-entity class="gun-model" position="0 0.05 0.114"
+        gltf-model="url(models/pistolet.glb)" shadow="cast: true; receive: true"></a-entity>
+      <a-entity class="gun-fallback" position="0 0.05 0.114" visible="false">
+        <a-box position="0 0 -0.08" width="0.045" height="0.06" depth="0.26" color="#2b2b2e" shadow></a-box>
+        <a-cylinder position="0 0.005 -0.25" rotation="90 0 0" radius="0.012" height="0.08" color="#151515" shadow></a-cylinder>
+        <a-box position="0 -0.075 0.01" rotation="-15 0 0" width="0.04" height="0.11" depth="0.05" color="#5a3b24" shadow></a-box>
+        <a-box position="0 -0.045 -0.05" width="0.012" height="0.03" depth="0.04" color="#888888"></a-box>
+      </a-entity>
+      <a-entity class="muzzle" position="0 0.068 -0.2"></a-entity>
+    </a-entity>
+
+    <!-- ========== EXERCICE 4 : score ========== -->
+    <a-text id="score" value="Score : 0" position="0 4.2 -10" align="center" width="10" color="#ffffff"></a-text>
+
+    <!-- ========== EXERCICE 1 : rig joueur ========== -->
+    <a-entity id="rig" position="0 0 0.5"
+      joystick-locomotion="leftHand: #leftHand; rightHand: #rightHand; speed: 2; turnSpeed: 90">
+      <a-entity id="camera" camera look-controls wasd-controls position="0 1.6 0"></a-entity>
+
+      <a-entity id="leftHand"
+        oculus-touch-controls="hand: left"
+        vive-controls="hand: left"
+        windows-motion-controls="hand: left"
+        line="start: 0 0 0; end: 0 0 -4; color: #ffffff; opacity: 0.35; visible: false"
+        grabber></a-entity>
+
+      <a-entity id="rightHand"
+        oculus-touch-controls="hand: right"
+        vive-controls="hand: right"
+        windows-motion-controls="hand: right"
+        line="start: 0 0 0; end: 0 0 -4; color: #ffffff; opacity: 0.35; visible: false"
+        grabber></a-entity>
+    </a-entity>
+  </a-scene>
+</body>
+</html>

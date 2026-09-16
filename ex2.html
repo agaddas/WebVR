@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>ST2AWD – TP 03 – Exercice 2 : Grabbing</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-physics-system@v4.2.2/dist/aframe-physics-system.min.js"></script>
+
+  <script>
+  /* =====================================================================
+   * EXERCICE 1 — Déplacement aux joysticks
+   * Joystick gauche : avant / arrière / gauche / droite (selon le regard)
+   * Joystick droit  : rotation de la vue
+   * ===================================================================== */
+  AFRAME.registerComponent('joystick-locomotion', {
+    schema: {
+      leftHand:  { type: 'selector' },
+      rightHand: { type: 'selector' },
+      speed:     { default: 2 },    // m/s
+      turnSpeed: { default: 90 },   // degrés/s
+      deadzone:  { default: 0.2 }
+    },
+    init() {
+      this.move = { x: 0, y: 0 };
+      this.turn = 0;
+      this.data.leftHand.addEventListener('thumbstickmoved', e => {
+        this.move.x = e.detail.x; this.move.y = e.detail.y;
+      });
+      this.data.rightHand.addEventListener('thumbstickmoved', e => {
+        this.turn = e.detail.x;
+      });
+      this.forward = new THREE.Vector3();
+      this.right = new THREE.Vector3();
+      this.up = new THREE.Vector3(0, 1, 0);
+      this.before = new THREE.Vector3();
+      this.after = new THREE.Vector3();
+    },
+    tick(t, dtMs) {
+      if (!dtMs) return;
+      const d = this.data;
+      const dt = Math.min(dtMs, 100) / 1000;
+      const rig = this.el.object3D;
+      const cam = this.el.sceneEl.camera;   // mis à jour par WebXR en VR
+      const dz = v => (Math.abs(v) < d.deadzone ? 0 : v);
+
+      // Rotation autour de la tête (et non du centre du rig)
+      const turn = dz(this.turn);
+      if (turn) {
+        cam.getWorldPosition(this.before);
+        rig.rotation.y -= THREE.MathUtils.degToRad(d.turnSpeed) * turn * dt;
+        rig.updateMatrixWorld(true);
+        cam.getWorldPosition(this.after);
+        rig.position.x += this.before.x - this.after.x;
+        rig.position.z += this.before.z - this.after.z;
+      }
+
+      // Translation dans le plan horizontal, relative au regard
+      const mx = dz(this.move.x), my = dz(this.move.y);
+      if (mx || my) {
+        cam.getWorldDirection(this.forward);
+        this.forward.y = 0;
+        if (this.forward.lengthSq() < 1e-6) return;
+        this.forward.normalize();
+        this.right.crossVectors(this.forward, this.up);
+        rig.position
+          .addScaledVector(this.forward, -my * d.speed * dt) // y < 0 = stick poussé vers l'avant
+          .addScaledVector(this.right, mx * d.speed * dt);
+      }
+    }
+  });
+
+  /* =====================================================================
+   * EXERCICE 2 — Grab / release
+   * Grip appuyé  : l'objet le plus proche est attaché à la main (physique coupée)
+   * Grip relâché : l'objet revient dans la scène avec la vitesse de la main
+   * ===================================================================== */
+
+  // Position/rotation de l'objet dans la main (utile pour l'arme)
+  AFRAME.registerComponent('hold-pose', {
+    schema: {
+      position: { type: 'vec3', default: { x: 0, y: 0, z: 0 } },
+      rotation: { type: 'vec3', default: { x: 0, y: 0, z: 0 } }
+    }
+  });
+
+  AFRAME.registerComponent('grabber', {
+    schema: {
+      radius:   { default: 0.12 },  // prise directe : objet à moins de 12 cm de la main
+      reach:    { default: 4 },     // prise à distance : objet visé jusqu'à 4 m
+      holdDist: { default: 0.1 }    // un objet attrapé à distance arrive à 10 cm devant la main
+    },
+    init() {
+      this.held = null;
+      this.handPos = new THREE.Vector3();
+      this.prevPos = new THREE.Vector3();
+      this.velocity = new THREE.Vector3();
+      this.tmp = new THREE.Vector3();
+      this.box = new THREE.Box3();
+      // Le rayon de visée n'apparaît qu'une fois la manette détectée
+      this.el.addEventListener('controllerconnected', () => this.el.setAttribute('line', 'visible', true));
+      this.el.addEventListener('controllerdisconnected', () => this.el.setAttribute('line', 'visible', false));
+      this.ray = new THREE.Ray();
+      this.quat = new THREE.Quaternion();
+      this.hit = new THREE.Vector3();
+      this.el.addEventListener('gripdown', () => { console.log('[grabber] gripdown', this.el.id); this.grab(); });
+      this.el.addEventListener('gripup', () => this.release());
+    },
+    grab() {
+      if (this.held) return;
+      this.el.object3D.getWorldPosition(this.handPos);
+      let best = null, bestDist = Infinity;
+      document.querySelectorAll('.grabbable').forEach(obj => {
+        if (obj.grabbedBy) return;
+        this.box.setFromObject(obj.object3D);
+        const dist = this.box.distanceToPoint(this.handPos);
+        if (dist < this.data.radius && dist < bestDist) { best = obj; bestDist = dist; }
+      });
+
+      // Rien à portée de main : on prend l'objet visé par la manette (utile avec l'émulateur)
+      let fromAfar = false;
+      if (!best) {
+        this.el.object3D.getWorldQuaternion(this.quat);
+        this.ray.set(this.handPos, new THREE.Vector3(0, 0, -1).applyQuaternion(this.quat));
+        bestDist = Infinity;
+        document.querySelectorAll('.grabbable').forEach(obj => {
+          if (obj.grabbedBy) return;
+          this.box.setFromObject(obj.object3D).expandByScalar(0.05);
+          if (!this.ray.intersectBox(this.box, this.hit)) return;
+          const dist = this.hit.distanceTo(this.handPos);
+          if (dist < this.data.reach && dist < bestDist) { best = obj; bestDist = dist; }
+        });
+        fromAfar = !!best;
+      }
+      if (!best) { console.log('[grabber] aucun objet à portée ni visé'); return; }
+
+      this.held = best;
+      best.grabbedBy = this.el;
+      best.bodyConfig = Object.assign({}, best.getAttribute('dynamic-body'));
+      best.removeAttribute('dynamic-body');          // l'objet ne subit plus la physique
+      this.el.object3D.attach(best.object3D);        // il suit la main
+      if (fromAfar) best.object3D.position.set(0, 0, -this.data.holdDist);
+
+      const pose = best.getAttribute('hold-pose');
+      if (pose) {
+        best.object3D.position.set(pose.position.x, pose.position.y, pose.position.z);
+        best.object3D.rotation.set(
+          THREE.MathUtils.degToRad(pose.rotation.x),
+          THREE.MathUtils.degToRad(pose.rotation.y),
+          THREE.MathUtils.degToRad(pose.rotation.z));
+      }
+      pulse(this.el, 0.3, 40);
+      best.emit('grabbed', { hand: this.el });
+    },
+    release() {
+      const obj = this.held;
+      if (!obj) return;
+      this.held = null;
+      obj.grabbedBy = null;
+      this.el.sceneEl.object3D.attach(obj.object3D); // retour dans la scène (coords monde)
+      const v = this.velocity.clone();
+      setInitialVelocity(obj, v);                    // lancer avec la vitesse de la main
+      obj.setAttribute('dynamic-body', obj.bodyConfig); // gravité réactivée
+      obj.emit('released', { hand: this.el });
+    },
+    tick(t, dt) {
+      if (!dt) return;
+      this.el.object3D.getWorldPosition(this.handPos);
+      this.tmp.subVectors(this.handPos, this.prevPos).multiplyScalar(1000 / dt);
+      this.velocity.lerp(this.tmp, 0.5);
+      this.prevPos.copy(this.handPos);
+    }
+  });
+
+  /* Vitesse initiale d'un corps physique.
+   * Attention : le composant body copie l'attribut `velocity` (0 0 0) vers
+   * Cannon juste après 'body-loaded' (dans play()). Une vitesse posée dans
+   * 'body-loaded' est donc écrasée : on l'applique au premier pas physique. */
+  function setInitialVelocity(el, v) {
+    const apply = () => {
+      const world = el.sceneEl.systems.physics.driver.world;
+      const once = () => {
+        world.removeEventListener('preStep', once);
+        if (el.body) el.body.velocity.set(v.x, v.y, v.z);
+      };
+      world.addEventListener('preStep', once);
+    };
+    el.addEventListener('body-loaded', apply, { once: true });
+  }
+
+  function pulse(hand, intensity, ms) {
+    try {
+      hand.components['tracked-controls'].controller.gamepad.hapticActuators[0].pulse(intensity, ms);
+    } catch (e) { /* pas de retour haptique disponible */ }
+  }
+
+  </script>
+</head>
+
+<body>
+  <a-scene
+    renderer="antialias: true; colorManagement: true"
+    shadow="type: pcfsoft"
+    physics="driver: local; gravity: -9.8; debug: false">
+
+    <a-sky color="#a9d0ec"></a-sky>
+
+    <!-- ========== EXERCICE 1 : lumières ========== -->
+    <a-entity light="type: ambient; color: #ffffff; intensity: 0.45"></a-entity>
+    <a-entity position="-4 10 6"
+      light="type: directional; color: #ffffff; intensity: 0.9;
+             castShadow: true; shadowMapWidth: 2048; shadowMapHeight: 2048;
+             shadowCameraLeft: -15; shadowCameraRight: 15;
+             shadowCameraTop: 15; shadowCameraBottom: -15;
+             shadowCameraFar: 40; shadowBias: -0.0005"></a-entity>
+
+    <!-- Sol (boîte fine : collision plus fiable qu'un plan) -->
+    <a-box static-body position="0 -0.05 0" width="40" height="0.1" depth="40"
+      color="#7a9a63" shadow="cast: false; receive: true"></a-box>
+
+    <!-- Table -->
+    <a-box static-body position="0 0.4 -1.2" width="1.4" height="0.8" depth="0.7"
+      color="#8b5e3c" shadow="cast: true; receive: true"></a-box>
+
+    <!-- Objets simples (Ex. 1) rendus saisissables (Ex. 2) -->
+    <a-box class="grabbable" dynamic-body="mass: 0.5"
+      position="-0.45 0.95 -1.2" width="0.2" height="0.2" depth="0.2"
+      color="#e0533d" shadow="cast: true; receive: true"></a-box>
+
+    <a-sphere class="grabbable" dynamic-body="shape: sphere; sphereRadius: 0.1; mass: 0.4"
+      position="-0.15 0.95 -1.2" radius="0.1"
+      color="#3d7be0" shadow="cast: true; receive: true"></a-sphere>
+
+    <a-cylinder class="grabbable" dynamic-body="mass: 0.4"
+      position="0.1 0.95 -1.2" radius="0.07" height="0.2"
+      color="#e0c33d" shadow="cast: true; receive: true"></a-cylinder>
+
+    <!-- ========== EXERCICE 1 : rig joueur ========== -->
+    <a-entity id="rig" position="0 0 0.5"
+      joystick-locomotion="leftHand: #leftHand; rightHand: #rightHand; speed: 2; turnSpeed: 90">
+      <a-entity id="camera" camera look-controls wasd-controls position="0 1.6 0"></a-entity>
+
+      <a-entity id="leftHand"
+        oculus-touch-controls="hand: left"
+        vive-controls="hand: left"
+        windows-motion-controls="hand: left"
+        line="start: 0 0 0; end: 0 0 -4; color: #ffffff; opacity: 0.35; visible: false"
+        grabber></a-entity>
+
+      <a-entity id="rightHand"
+        oculus-touch-controls="hand: right"
+        vive-controls="hand: right"
+        windows-motion-controls="hand: right"
+        line="start: 0 0 0; end: 0 0 -4; color: #ffffff; opacity: 0.35; visible: false"
+        grabber></a-entity>
+    </a-entity>
+  </a-scene>
+</body>
+</html>
